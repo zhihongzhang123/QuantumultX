@@ -1,0 +1,19 @@
+# Auto Translate EN→CN | 英文网页自动翻译中文
+#!name=Auto Translate EN→CN
+#!desc=自动将英文网页翻译为中文。右上角悬浮按钮，点击即译。
+#!author=minimac
+#!tag=翻译, 网页增强
+#!system=iOS, iPadOS, macOS
+#!date=2026-05-02
+
+# === 英文新闻/资讯站点 ===
+^https?://([a-zA-Z0-9-]+\.)?(twitter|x)\.com/ url script-response-body https://raw.githubusercontent.com/zhihongzhang123/QuantumultX/main/Scripts/AutoTranslateEN2CN.js
+^https?://([a-zA-Z0-9-]+\.)?reddit\.com/ url script-response-body https://raw.githubusercontent.com/zhihongzhang123/QuantumultX/main/Scripts/AutoTranslateEN2CN.js
+^https?://([a-zA-Z0-9-]+\.)?medium\.com/ url script-response-body https://raw.githubusercontent.com/zhihongzhang123/QuantumultX/main/Scripts/AutoTranslateEN2CN.js
+^https?://([a-zA-Z0-9-]+\.)?substack\.com/ url script-response-body https://raw.githubusercontent.com/zhihongzhang123/QuantumultX/main/Scripts/AutoTranslateEN2CN.js
+^https?://([a-zA-Z0-9-]+\.)?(bloomberg|reuters|cnbc)\.com/ url script-response-body https://raw.githubusercontent.com/zhihongzhang123/QuantumultX/main/Scripts/AutoTranslateEN2CN.js
+^https?://([a-zA-Z0-9-]+\.)?(ft|wsj|economist)\.com/ url script-response-body https://raw.githubusercontent.com/zhihongzhang123/QuantumultX/main/Scripts/AutoTranslateEN2CN.js
+^https?://([a-zA-Z0-9-]+\.)?(nytimes|theguardian|bbc)\.com/ url script-response-body https://raw.githubusercontent.com/zhihongzhang123/QuantumultX/main/Scripts/AutoTranslateEN2CN.js
+^https?://([a-zA-Z0-9-]+\.)?(techcrunch|wired|theverge|arstechnica)\.com/ url script-response-body https://raw.githubusercontent.com/zhihongzhang123/QuantumultX/main/Scripts/AutoTranslateEN2CN.js
+
+hostname = *.com, *.net, *.org, twitter.com, x.com, reddit.com, medium.com, substack.com, bloomberg.com, reuters.com, cnbc.com, ft.com, wsj.com, economist.com, nytimes.com, theguardian.com, bbc.com, techcrunch.com, wired.com, theverge.com, arstechnica.com
