@@ -1,12 +1,12 @@
-# X(Twitter) 网页自动翻译中文 v4
-#!name=X Auto Translate
-#!desc=拦截 X GraphQL API JSON 响应，翻译 tweet 文本为中文。参考 XWebAds 去广告脚本方案。
+# X (Twitter) 网页版自动翻译中文
+#!name=X Web Auto Translate
+#!desc=X/Twitter 网页版自动翻译为中文
 #!author=minimac
-#!tag=翻译, X, Twitter
+#!tag=翻译, X
 #!system=iOS, iPadOS, macOS
 #!date=2026-05-02
 
-# 拦截 X 的 GraphQL API 响应（JSON），翻译 tweet 文本
-^https://x\.com/i/api/graphql url script-response-body https://raw.githubusercontent.com/zhihongzhang123/QuantumultX/main/Scripts/XTranslateGraphQL.js
+# 匹配 X/Twitter 网页
+^https?://([a-zA-Z0-9-]+\.)?(twitter|x)\.com/ url script-response-body https://raw.githubusercontent.com/zhihongzhang123/QuantumultX/main/Scripts/XTranslate.js
 
-hostname = x.com, twitter.com
+hostname = twitter.com, x.com
