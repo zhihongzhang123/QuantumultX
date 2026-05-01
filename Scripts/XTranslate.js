@@ -1,319 +1,288 @@
 /*
  * Quantumult X Script: X(Twitter) 网页自动翻译中文
- * 方案: 通过 GraphQL API 响应拦截 + 注入翻译脚本双管齐下
- * 针对: X/Twitter 网页版 SPA 架构
+ * 原理: 拦截 X 的 HTML shell → 注入 MutationObserver 翻译脚本 → 实时翻译动态加载的推文
+ * 翻译API: MyMemory (免费, 无需key, 5000词/天)
  */
 
-const $ = new Env("X自动翻译");
+const $ = new Env("XTranslate");
 
-// 检查是否是 GraphQL API 响应（JSON）
-const isJSON = $response.headers?.['Content-Type']?.includes('application/json') || false;
-
-if (isJSON) {
-  // === 模式1: 拦截 JSON API 响应 ===
-  // 在 JSON 中注入翻译标记，通知前端脚本处理
-  try {
-    let body = JSON.parse($response.body);
-
-    // 遍历 JSON 查找并标记文本节点
-    function walkAndMark(obj) {
-      if (!obj || typeof obj !== 'object') return;
-      
-      if (Array.isArray(obj)) {
-        obj.forEach(walkAndMark);
-        return;
-      }
-
-      // 在顶层添加翻译标记
-      if (obj.data) {
-        obj._translate_flag = 'en2cn';
-        obj._translate_lang = 'en';
-      }
-
-      Object.values(obj).forEach(walkAndMark);
-    }
-
-    if (body.data) {
-      walkAndMark(body);
-      $done({ body: JSON.stringify(body) });
-      return;
-    }
-  } catch (e) {
-    console.log('[XTranslate] JSON parse error:', e);
-  }
+// 只处理 HTML 响应
+const contentType = $response.headers?.['Content-Type'] || '';
+if (!contentType.includes('text/html')) {
   $done({});
   return;
 }
 
-// === 模式2: 注入翻译脚本到 HTML shell ===
 let body = $response.body || '';
-
-if (!body.includes('<html') && !body.includes('<head') && !body.includes('<body')) {
+if (!body || body.length < 100) {
   $done({});
   return;
 }
 
+// 注入翻译脚本
 const translateScript = `
-<script>
+<script type="text/javascript">
 (function() {
-  'use strict';
+  if (window.__xt_injected) return;
+  window.__xt_injected = true;
 
-  // 防止重复注入
-  if (window.__xtranslate_injected) return;
-  window.__xtranslate_injected = true;
-
-  console.log('[XTranslate] 翻译脚本已注入');
-
-  // ============ 翻译引擎 ============
-  var TranslateEngine = {
-    // 使用 MyMemory 免费翻译 API（无需 Key）
-    cache: {},
-    queue: [],
-    processing: false,
-
-    translate: function(text, callback) {
-      if (!text || text.length < 3 || text.length > 5000) {
-        callback(text);
-        return;
-      }
-
-      // 检测是否已含中文
-      if (/[\u4e00-\u9fff]/.test(text)) {
-        callback(text);
-        return;
-      }
-
-      var cacheKey = text;
-      if (this.cache[cacheKey]) {
-        callback(this.cache[cacheKey]);
-        return;
-      }
-
-      // 加入队列
-      this.queue.push({ text: text, callback: callback });
-      this.processQueue();
-    },
-
-    processQueue: function() {
-      if (this.processing || this.queue.length === 0) return;
-      this.processing = true;
-
-      var item = this.queue.shift();
-      var encoded = encodeURIComponent(item.text);
-      var url = 'https://api.mymemory.translated.net/get?q=' + encoded + '&langpair=en|zh-CN';
-
-      var xhr = new XMLHttpRequest();
-      xhr.open('GET', url, true);
-      xhr.onload = function() {
-        try {
-          var data = JSON.parse(xhr.responseText);
-          var translated = data.responseData && data.responseData.translatedText;
-          if (translated && translated !== item.text) {
-            TranslateEngine.cache[item.text] = translated;
-            item.callback(translated);
-          } else {
-            item.callback(item.text);
-          }
-        } catch(e) {
-          item.callback(item.text);
-        }
-        TranslateEngine.processing = false;
-        setTimeout(function() { TranslateEngine.processQueue(); }, 200);
-      };
-      xhr.onerror = function() {
-        item.callback(item.text);
-        TranslateEngine.processing = false;
-        setTimeout(function() { TranslateEngine.processQueue(); }, 200);
-      };
-      xhr.send();
-    }
+  // ====== 配置 ======
+  var CONFIG = {
+    autoTranslate: true,       // 是否自动翻译
+    targetLang: 'zh-CN',      // 目标语言
+    sourceLang: 'en',          // 源语言
+    api: 'https://api.mymemory.translated.net/get', // 免费翻译API
+    cacheSize: 500,            // 缓存大小
+    batchSize: 5,              // 批处理大小
+    debounceMs: 800,           // 防抖延迟(ms)
   };
 
-  // ============ DOM 翻译器 ============
+  // ====== 翻译引擎 ======
   var Translator = {
-    translating: false,
-    translatedNodes: new WeakSet(),
+    cache: new Map(),
+    queue: [],
+    processing: false,
+    timer: null,
 
-    // 需要跳过的元素
+    // 快速语言检测
+    isEnglish: function(text) {
+      if (!text || text.length < 3) return false;
+      if (/[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]/.test(text)) return false;
+      var ascii = text.replace(/[^a-zA-Z]/g, '').length;
+      return ascii / text.length > 0.6;
+    },
+
+    // 跳过这些元素
     shouldSkip: function(el) {
       if (!el || !el.tagName) return true;
       var tag = el.tagName.toLowerCase();
-      if (['script', 'style', 'noscript', 'svg', 'path', 'meta', 'link', 'head'].includes(tag)) return true;
-      if (el.closest('script, style, noscript, svg, head')) return true;
-      if (el.getAttribute('aria-hidden') === 'true') return true;
+      if (['script','style','noscript','svg','path','circle','rect','line','polygon','ellipse','use','g','defs','clippath','image'].includes(tag)) return true;
+      if (el.getAttribute('data-translated')) return true;
+      if (el.closest && el.closest('[data-translated="true"], script, style, noscript, svg, .xt-translated')) return true;
+      var cls = el.className || '';
+      if (typeof cls === 'string' && cls.includes('xt-')) return true;
       return false;
     },
 
-    // 翻译单个文本节点
-    translateTextNode: function(node) {
-      if (this.translatedNodes.has(node)) return;
+    // 翻译单个文本
+    translate: function(text) {
+      return new Promise(function(resolve) {
+        if (!text || text.trim().length < 2) { resolve(text); return; }
+        text = text.trim();
+        if (!Translator.isEnglish(text)) { resolve(text); return; }
+        if (Translator.cache.has(text)) { resolve(Translator.cache.get(text)); return; }
 
-      var text = node.textContent.trim();
-      if (!text || text.length < 3) return;
-
-      // 跳过纯数字/符号
-      if (!/[a-zA-Z]/.test(text)) return;
-      // 跳过已含中文
-      if (/[\u4e00-\u9fff]/.test(text)) return;
-      // 跳过 @用户名 和 #标签 和 URL
-      if (/^[@#]/.test(text)) return;
-      if (/^https?:\/\//.test(text)) return;
-
-      var parent = node.parentElement;
-      if (!parent || this.shouldSkip(parent)) return;
-
-      TranslateEngine.translate(text, function(translated) {
-        if (translated && translated !== text && !node.parentElement.closest('.skiptranslate')) {
-          node.textContent = translated;
-          parent.setAttribute('data-translated', 'true');
-          Translator.translatedNodes.add(node);
-        }
+        var xhr = new XMLHttpRequest();
+        var url = CONFIG.api + '?q=' + encodeURIComponent(text.substring(0, 4500)) + '&langpair=' + CONFIG.sourceLang + '|' + CONFIG.targetLang;
+        xhr.open('GET', url, true);
+        xhr.timeout = 5000;
+        xhr.onload = function() {
+          try {
+            var res = JSON.parse(xhr.responseText);
+            var translated = res.responseData && res.responseData.translatedText;
+            if (translated && translated !== text && !/NOT_FOUND|ERROR/.test(res.responseStatus)) {
+              Translator.cache.set(text, translated);
+              if (Translator.cache.size > CONFIG.cacheSize) {
+                var first = Translator.cache.keys().next().value;
+                Translator.cache.delete(first);
+              }
+              resolve(translated);
+            } else {
+              resolve(text);
+            }
+          } catch(e) { resolve(text); }
+        };
+        xhr.onerror = function() { resolve(text); };
+        xhr.ontimeout = function() { resolve(text); };
+        xhr.send();
       });
     },
 
-    // 处理 DOM 变化
-    handleMutations: function(mutations) {
-      if (this.translating) return;
-
-      for (var i = 0; i < mutations.length; i++) {
-        var mutation = mutations[i];
-
-        // 新增的文本节点
-        if (mutation.addedNodes) {
-          for (var j = 0; j < mutation.addedNodes.length; j++) {
-            var node = mutation.addedNodes[j];
-
-            if (node.nodeType === Node.TEXT_NODE) {
-              this.translateTextNode(node);
-            } else if (node.nodeType === Node.ELEMENT_NODE) {
-              // 遍历子节点的文本
-              var walker = document.createTreeWalker(
-                node,
-                NodeFilter.SHOW_TEXT,
-                null
-              );
-
-              var textNode;
-              while ((textNode = walker.nextNode())) {
-                this.translateTextNode(textNode);
-              }
+    // 批量处理队列
+    flush: async function() {
+      if (this.queue.length === 0) return;
+      var batch = this.queue.splice(0, CONFIG.batchSize);
+      for (var i = 0; i < batch.length; i++) {
+        var item = batch[i];
+        try {
+          var translated = await this.translate(item.text);
+          if (translated && translated !== item.text && item.node && item.node.parentNode) {
+            item.node.textContent = translated;
+            if (item.node.parentElement) {
+              item.node.parentElement.setAttribute('data-translated', 'true');
             }
           }
+        } catch(e) {}
+        // 请求间隔，避免被限流
+        if (i < batch.length - 1) {
+          await new Promise(function(r) { setTimeout(r, 300); });
         }
+      }
+      if (this.queue.length > 0) {
+        this.processQueue();
+      } else {
+        this.processing = false;
+      }
+    },
 
-        // 文本内容变化
-        if (mutation.type === 'characterData' && mutation.target) {
-          this.translateTextNode(mutation.target);
+    processQueue: function() {
+      if (!this.processing) {
+        this.processing = true;
+        this.flush();
+      }
+    },
+
+    queueText: function(node, text) {
+      this.queue.push({ node: node, text: text });
+      if (!this.processing) {
+        this.processing = true;
+        this.flush();
+      }
+    },
+
+    // 翻译一个节点及其子节点中的所有文本
+    translateNode: function(node) {
+      if (!node) return;
+
+      if (node.nodeType === Node.TEXT_NODE) {
+        var text = node.textContent;
+        if (text && this.isEnglish(text)) {
+          this.queueText(node, text);
+        }
+        return;
+      }
+
+      if (node.nodeType === Node.ELEMENT_NODE) {
+        if (this.shouldSkip(node)) return;
+
+        // 直接子文本节点
+        for (var i = 0; i < node.childNodes.length; i++) {
+          var child = node.childNodes[i];
+          if (child.nodeType === Node.TEXT_NODE && child.textContent.trim().length > 0) {
+            this.translateNode(child);
+          }
         }
       }
     },
 
-    // 初始化
-    init: function() {
-      var self = this;
-
-      // 监听 DOM 变化
-      var observer = new MutationObserver(function(mutations) {
-        self.handleMutations(mutations);
-      });
-
-      observer.observe(document.body || document.documentElement, {
-        childList: true,
-        subtree: true,
-        characterData: true
-      });
-
-      // 翻译已有内容
-      setTimeout(function() {
-        var walker = document.createTreeWalker(
-          document.body || document.documentElement,
-          NodeFilter.SHOW_TEXT,
-          null
-        );
-
-        var textNode;
-        var batch = [];
-        while ((textNode = walker.nextNode())) {
-          batch.push(textNode);
-          if (batch.length >= 20) {
-            batch.forEach(function(n) { self.translateTextNode(n); });
-            batch = [];
-          }
-        }
-        batch.forEach(function(n) { self.translateTextNode(n); });
-      }, 1000);
-
-      // 创建翻译按钮
-      this.createButton();
-    },
-
-    // 创建悬浮按钮
-    createButton: function() {
+    // ====== UI 按钮 ======
+    createUI: function() {
       var btn = document.createElement('div');
-      btn.id = 'x-translate-btn';
-      btn.innerHTML = '🌐 翻译';
-      btn.style.cssText = 'position:fixed;top:70px;right:10px;z-index:1000000;padding:8px 16px;' +
-        'background:rgba(29,155,240,0.9);color:#fff;border-radius:20px;font-size:13px;' +
-        'cursor:pointer;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;' +
-        'box-shadow:0 2px 12px rgba(0,0,0,0.4);transition:all 0.3s;user-select:none;' +
-        'border:1px solid rgba(255,255,255,0.1);';
+      btn.id = 'xt-btn';
+      btn.style.cssText = 'position:fixed;top:10px;right:10px;z-index:2147483647;padding:6px 14px;background:#1d9bf0;color:#fff;border-radius:9999px;font-size:13px;font-weight:600;cursor:pointer;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;box-shadow:0 2px 8px rgba(0,0,0,0.3);user-select:none;display:flex;align-items:center;gap:4px;';
+      btn.innerHTML = CONFIG.autoTranslate ? '🌐 翻译中...' : '🌐 翻译';
 
-      var isActive = true;
+      var self = this;
+      var active = CONFIG.autoTranslate;
 
       btn.onclick = function() {
-        if (isActive) {
-          btn.innerHTML = '🌐 已翻译';
-          btn.style.background = 'rgba(52,168,83,0.9)';
-          isActive = false;
-          location.reload();
-        } else {
-          btn.innerHTML = '🌐 翻译';
-          btn.style.background = 'rgba(29,155,240,0.9)';
-          isActive = true;
-          location.reload();
+        active = !active;
+        btn.innerHTML = active ? '🌐 翻译中...' : '🌐 翻译';
+        btn.style.background = active ? '#1d9bf0' : 'rgba(80,80,80,0.8)';
+        if (active) {
+          self.scanPage();
         }
       };
 
       document.body.appendChild(btn);
-    }
+    },
+
+    // ====== 扫描整页 ======
+    scanPage: function() {
+      var self = this;
+      // 分批扫描，避免阻塞主线程
+      var elements = document.querySelectorAll('span, p, div, a, h1, h2, h3, h4, h5, h6, label, li, td, th');
+      var idx = 0;
+      var chunk = 50;
+
+      function processChunk() {
+        var end = Math.min(idx + chunk, elements.length);
+        for (var i = idx; i < end; i++) {
+          var el = elements[i];
+          if (self.shouldSkip(el)) continue;
+          // 只处理直接包含文本的元素
+          if (el.childNodes.length === 1 && el.childNodes[0].nodeType === Node.TEXT_NODE) {
+            self.translateNode(el.childNodes[0]);
+          }
+        }
+        idx = end;
+        if (idx < elements.length) {
+          requestAnimationFrame(processChunk);
+        }
+      }
+      requestAnimationFrame(processChunk);
+    },
+
+    // ====== 初始化 ======
+    init: function() {
+      var self = this;
+
+      // 等待 body 出现
+      function waitForBody() {
+        if (document.body) {
+          self.createUI();
+          if (CONFIG.autoTranslate) {
+            setTimeout(function() { self.scanPage(); }, 1500);
+          }
+          self.setupObserver();
+        } else {
+          setTimeout(waitForBody, 100);
+        }
+      }
+      waitForBody();
+    },
+
+    // ====== MutationObserver - 实时监听新内容 ======
+    setupObserver: function() {
+      var self = this;
+      var observer = new MutationObserver(function(mutations) {
+        for (var m = 0; m < mutations.length; m++) {
+          var mutation = mutations[m];
+          if (mutation.type === 'childList') {
+            for (var i = 0; i < mutation.addedNodes.length; i++) {
+              var node = mutation.addedNodes[i];
+              if (node.nodeType === Node.TEXT_NODE) {
+                self.translateNode(node);
+              } else if (node.nodeType === Node.ELEMENT_NODE) {
+                // 快速扫描新增节点的直接文本
+                for (var j = 0; j < node.childNodes.length; j++) {
+                  if (node.childNodes[j].nodeType === Node.TEXT_NODE) {
+                    self.translateNode(node.childNodes[j]);
+                  }
+                }
+              }
+            }
+          }
+        }
+      });
+
+      observer.observe(document.documentElement || document.body, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+      });
+    },
   };
 
-  // 等待页面加载完成后启动
-  if (document.readyState === 'complete') {
-    Translator.init();
-  } else {
-    window.addEventListener('load', function() {
-      Translator.init();
-    });
-  }
-
-  // 也尝试在 DOMContentLoaded 时启动（SPA 通常不需要等 load）
+  // 启动
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', function() {
-      setTimeout(function() { Translator.init(); }, 500);
-    });
+    document.addEventListener('DOMContentLoaded', function() { Translator.init(); });
   } else {
-    setTimeout(function() { Translator.init(); }, 500);
+    Translator.init();
   }
 })();
 </script>`;
 
-// 注入到 HTML
+// 注入脚本到 </head> 之前
 if (body.includes('</head>')) {
-  body = body.replace('</head>', translateScript + '</head>');
-} else if (body.includes('<body')) {
-  body = body.replace(/<body[^>]*>/, '$&' + translateScript);
+  body = body.replace('</head>', translateScript + '\n</head>');
+} else if (body.includes('<head')) {
+  body = body.replace(/<head[^>]*>/, '$&\n' + translateScript);
 } else {
-  body = translateScript + body;
+  body = translateScript + '\n' + body;
 }
 
-console.log('[XTranslate] Script injected');
 $done({ body: body });
 
-// ============ Env Utility ============
-function Env(name) {
-  return {
-    name: name,
-    log: function() { console.log.apply(console, arguments); }
-  };
-}
+// ============ QuantumultX Env ============
+function Env(n) { return { name: n, log: function() { console.log.apply(console, arguments); } }; }
